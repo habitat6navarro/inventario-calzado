@@ -490,7 +490,7 @@ elif pagina == "Nuevo Producto":
                 pid = res.data[0]["id"]
                 for t in sorted(tallas_input):
                     s = stock_inicial.get(t, 0)
-                    supabase.table("inventario").insert({"producto_id": pid, "talla": t, "stock": s}).execute()
+                    supabase.table("inventario").insert({"producto_id": pid, "talla": t, "stock": 0}).execute()
                     if s > 0:
                         registrar_movimiento(pid, t, "ENTRADA", s, "Stock inicial al crear producto")
             st.balloons()
