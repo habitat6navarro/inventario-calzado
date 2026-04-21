@@ -473,7 +473,7 @@ elif pagina == "Nuevo Producto":
             </div>""", unsafe_allow_html=True)
     st.markdown("<br><div class='section-title'>TALLAS INICIALES (Opcional)</div>", unsafe_allow_html=True)
     st.caption("Puedes agregar tallas ahora o después en Movimientos → ENTRADA")
-    tallas_input = st.multiselect("Selecciona las tallas disponibles", options=[34,35,36,37,38,39,40,41,42,43,44,45], default=[38,39,40,41,42])
+    tallas_input = st.multiselect("Selecciona las tallas disponibles", options=[24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45], default=[38,39,40,41,42])
     stock_inicial = {}
     if tallas_input:
         cols = st.columns(min(len(tallas_input), 6))
