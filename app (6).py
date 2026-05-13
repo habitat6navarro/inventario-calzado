@@ -107,7 +107,7 @@ def get_stock_talla(producto_id, talla):
     res = supabase.table("inventario").select("stock").eq("producto_id", producto_id).eq("talla", talla).execute()
     return res.data[0]["stock"] if res.data else 0
 
-def registrar_movimiento(producto_id, talla, tipo, cantidad, notas=""):
+def registrar_movimiento(producto_id, talla, tipo, cantidad, notas="", precio_venta_real=0):
     try:
         res = supabase.table("inventario").select("stock").eq("producto_id", producto_id).eq("talla", talla).execute()
         if not res.data:
@@ -125,10 +125,12 @@ def registrar_movimiento(producto_id, talla, tipo, cantidad, notas=""):
             stock_nuevo = stock_antes + cantidad
         else:
             stock_nuevo = max(0, stock_antes + cantidad)
+        total_venta = precio_venta_real * cantidad if tipo == "VENTA" else 0
         supabase.table("inventario").update({"stock": stock_nuevo}).eq("producto_id", producto_id).eq("talla", talla).execute()
         supabase.table("historial_movimientos").insert({
             "producto_id": producto_id, "talla": talla, "tipo": tipo,
-            "cantidad": cantidad, "stock_antes": stock_antes, "stock_despues": stock_nuevo, "notas": notas,
+            "cantidad": cantidad, "stock_antes": stock_antes, "stock_despues": stock_nuevo,
+            "notas": notas, "precio_venta_real": precio_venta_real, "total_venta": total_venta,
         }).execute()
         return True, f"✓ {tipo} registrada. Stock {stock_antes} → {stock_nuevo} par(es)."
     except Exception as e:
@@ -173,7 +175,7 @@ def eliminar_producto(producto_id):
 
 def get_historial(limit=100):
     res = supabase.table("historial_movimientos").select(
-        "fecha, tipo, talla, cantidad, stock_antes, stock_despues, notas, productos(marca, referencia)"
+        "fecha, tipo, talla, cantidad, stock_antes, stock_despues, notas, precio_venta_real, total_venta, productos(marca, referencia)"
     ).order("fecha", desc=True).limit(limit).execute()
     if not res.data:
         return pd.DataFrame()
@@ -185,6 +187,8 @@ def get_historial(limit=100):
             "talla": r["talla"], "tipo": r["tipo"], "cantidad": r["cantidad"],
             "stock_antes": r["stock_antes"], "stock_despues": r["stock_despues"],
             "notas": r["notas"] or "",
+            "precio_venta_real": r.get("precio_venta_real") or 0,
+            "total_venta": r.get("total_venta") or 0,
         })
     return pd.DataFrame(rows)
 
@@ -432,6 +436,17 @@ elif pagina == "Movimientos":
             cantidad = st.number_input("Cantidad (+ añadir, − descontar)", min_value=-9999, max_value=9999, value=0, step=1)
         else:
             cantidad = st.number_input("Cantidad de Pares", min_value=1, max_value=9999, value=1, step=1)
+        precio_venta_real = 0
+        if tipo_mov == "VENTA":
+            precio_venta_real = st.number_input("Precio de Venta ($)", min_value=0.0, step=1000.0, format="%.0f",
+                                                 help="Precio real al que se vendió el par")
+            if precio_venta_real > 0 and cantidad > 0:
+                total = precio_venta_real * cantidad
+                st.markdown(f"""
+                <div class='metric-card' style='margin-top:8px'>
+                    <div class='metric-label'>Total de la Venta</div>
+                    <div class='metric-value success' style='font-size:1.8rem'>$ COP {total:,.0f}</div>
+                </div>""", unsafe_allow_html=True)
         notas = st.text_input("Notas (opcional)", placeholder="Ej: Proveedor XYZ, Factura #123")
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button(f"✓ Registrar {tipo_mov}", use_container_width=True):
@@ -440,7 +455,7 @@ elif pagina == "Movimientos":
         elif cantidad == 0 and tipo_mov == "AJUSTE":
             st.markdown("<div class='msg-error'>⚠ La cantidad de ajuste no puede ser 0.</div>", unsafe_allow_html=True)
         else:
-            ok, msg = registrar_movimiento(producto_id, sel_talla, tipo_mov, cantidad, notas)
+            ok, msg = registrar_movimiento(producto_id, sel_talla, tipo_mov, cantidad, notas, precio_venta_real)
             if ok:
                 st.markdown(f"<div class='msg-success'>{msg}</div>", unsafe_allow_html=True)
                 st.balloons()
@@ -536,9 +551,13 @@ elif pagina == "Historial":
         df_hist["talla"]       = df_hist["talla"].apply(lambda x: f"{x:.0f}")
         df_hist["movimiento"]  = df_hist.apply(lambda r: f'+{int(r["cantidad"])}' if "ENTRADA" in str(r["tipo"]) else (f'−{int(r["cantidad"])}' if "VENTA" in str(r["tipo"]) else f'~{int(r["cantidad"])}'), axis=1)
         df_hist["stock_cambio"]= df_hist.apply(lambda r: f'{int(r["stock_antes"])} → {int(r["stock_despues"])}', axis=1)
-        df_hist["notas"]       = df_hist["notas"].fillna("—").replace("", "—")
-        df_show = df_hist[["fecha","marca","referencia","talla","tipo","movimiento","stock_cambio","notas"]].copy()
-        df_show.columns = ["Fecha","Marca","Referencia","Talla","Tipo","Cantidad","Stock antes→después","Notas"]
+        df_hist["precio_venta_real"] = df_hist.apply(
+            lambda r: f"$ COP {r['precio_venta_real']:,.0f}" if r["tipo"] == "🛒 VENTA" and r["precio_venta_real"] > 0 else "—", axis=1)
+        df_hist["total_venta"] = df_hist.apply(
+            lambda r: f"$ COP {r['total_venta']:,.0f}" if r["tipo"] == "🛒 VENTA" and r["total_venta"] > 0 else "—", axis=1)
+        df_hist["notas"] = df_hist["notas"].fillna("—").replace("", "—")
+        df_show = df_hist[["fecha","marca","referencia","talla","tipo","movimiento","stock_cambio","precio_venta_real","total_venta","notas"]].copy()
+        df_show.columns = ["Fecha","Marca","Referencia","Talla","Tipo","Cantidad","Stock antes→después","P. Venta","Total Venta","Notas"]
         def color_tipo(val):
             if "ENTRADA" in str(val): return "color: #55c075;"
             elif "VENTA"  in str(val): return "color: #e05555;"
