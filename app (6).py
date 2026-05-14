@@ -175,15 +175,17 @@ def eliminar_producto(producto_id):
 
 def get_historial(limit=100):
     res = supabase.table("historial_movimientos").select(
-        "fecha, tipo, talla, cantidad, stock_antes, stock_despues, notas, precio_venta_real, total_venta, productos(marca, referencia)"
-    ).order("fecha", desc=True).limit(limit).execute()
+        "id, fecha, tipo, talla, cantidad, stock_antes, stock_despues, notas, precio_venta_real, total_venta, eliminado, productos(marca, referencia, id)"
+    ).eq("eliminado", False).order("fecha", desc=True).limit(limit).execute()
     if not res.data:
         return pd.DataFrame()
     rows = []
     for r in res.data:
         p = r["productos"]
         rows.append({
+            "id": r["id"],
             "fecha": r["fecha"], "marca": p["marca"], "referencia": p["referencia"],
+            "producto_id": p["id"],
             "talla": r["talla"], "tipo": r["tipo"], "cantidad": r["cantidad"],
             "stock_antes": r["stock_antes"], "stock_despues": r["stock_despues"],
             "notas": r["notas"] or "",
@@ -191,6 +193,29 @@ def get_historial(limit=100):
             "total_venta": r.get("total_venta") or 0,
         })
     return pd.DataFrame(rows)
+
+
+def anular_movimiento(mov_id, producto_id, talla, tipo, cantidad):
+    """Anula un movimiento restaurando el stock al estado anterior."""
+    try:
+        res = supabase.table("inventario").select("stock").eq("producto_id", producto_id).eq("talla", talla).execute()
+        if not res.data:
+            return False, "No se encontró el inventario para esta talla."
+        stock_actual = res.data[0]["stock"]
+
+        # Revertir: si fue VENTA devolvemos, si fue ENTRADA quitamos
+        if tipo == "VENTA":
+            stock_restaurado = stock_actual + cantidad
+        elif tipo == "ENTRADA":
+            stock_restaurado = max(0, stock_actual - cantidad)
+        else:  # AJUSTE — revertir es complejo, solo marcamos como eliminado
+            stock_restaurado = stock_actual
+
+        supabase.table("inventario").update({"stock": stock_restaurado}).eq("producto_id", producto_id).eq("talla", talla).execute()
+        supabase.table("historial_movimientos").update({"eliminado": True}).eq("id", mov_id).execute()
+        return True, f"✓ Movimiento anulado. Stock restaurado: {stock_actual} → {stock_restaurado} par(es)."
+    except Exception as e:
+        return False, f"Error al anular: {e}"
 
 def get_dashboard_stats():
     inv = supabase.table("inventario").select("stock, productos(precio_venta)").execute()
@@ -530,37 +555,83 @@ elif pagina == "Historial":
     st.markdown("<div class='brand-header' style='font-size:2.2rem'>HISTORIAL</div>", unsafe_allow_html=True)
     st.markdown("<div class='brand-sub'>REGISTRO DE TODOS LOS MOVIMIENTOS</div>", unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
+
     col1, col2, col3 = st.columns(3)
     with col1: filtro_tipo = st.selectbox("Tipo", ["TODOS","ENTRADA","VENTA","AJUSTE"])
     with col2: limite = st.selectbox("Mostrar últimos", [50,100,200,500], index=1)
     with col3:
         st.markdown("<br>", unsafe_allow_html=True)
         exportar = st.button("⬇ Exportar CSV")
+
     with st.spinner("Cargando historial..."):
         hist = get_historial(limit=limite)
+
     if filtro_tipo != "TODOS" and not hist.empty:
         hist = hist[hist["tipo"] == filtro_tipo]
+
     if exportar and not hist.empty:
         st.download_button("📥 Descargar CSV", hist.to_csv(index=False).encode("utf-8"), "historial.csv", "text/csv")
+
     st.markdown(f"<br>**{len(hist)}** registros encontrados<br>", unsafe_allow_html=True)
+
+    if "anular_confirm" not in st.session_state:
+        st.session_state.anular_confirm = None
+
     if hist.empty:
         st.info("No hay movimientos registrados.")
     else:
-        df_hist = hist.copy()
-        df_hist["tipo"]        = df_hist["tipo"].map({"ENTRADA":"📥 ENTRADA","VENTA":"🛒 VENTA","AJUSTE":"⚙ AJUSTE"})
-        df_hist["talla"]       = df_hist["talla"].apply(lambda x: f"{x:.0f}")
-        df_hist["movimiento"]  = df_hist.apply(lambda r: f'+{int(r["cantidad"])}' if "ENTRADA" in str(r["tipo"]) else (f'−{int(r["cantidad"])}' if "VENTA" in str(r["tipo"]) else f'~{int(r["cantidad"])}'), axis=1)
-        df_hist["stock_cambio"]= df_hist.apply(lambda r: f'{int(r["stock_antes"])} → {int(r["stock_despues"])}', axis=1)
-        df_hist["precio_venta_real"] = df_hist.apply(
-            lambda r: f"$ COP {r['precio_venta_real']:,.0f}" if r["tipo"] == "🛒 VENTA" and r["precio_venta_real"] > 0 else "—", axis=1)
-        df_hist["total_venta"] = df_hist.apply(
-            lambda r: f"$ COP {r['total_venta']:,.0f}" if r["tipo"] == "🛒 VENTA" and r["total_venta"] > 0 else "—", axis=1)
-        df_hist["notas"] = df_hist["notas"].fillna("—").replace("", "—")
-        df_show = df_hist[["fecha","marca","referencia","talla","tipo","movimiento","stock_cambio","precio_venta_real","total_venta","notas"]].copy()
-        df_show.columns = ["Fecha","Marca","Referencia","Talla","Tipo","Cantidad","Stock antes→después","P. Venta","Total Venta","Notas"]
-        def color_tipo(val):
-            if "ENTRADA" in str(val): return "color: #55c075;"
-            elif "VENTA"  in str(val): return "color: #e05555;"
-            elif "AJUSTE" in str(val): return "color: #c8a96e;"
-            return ""
-        st.dataframe(df_show.style.map(color_tipo, subset=["Tipo"]), use_container_width=True, hide_index=True, height=520)
+        for _, row in hist.iterrows():
+            emoji = {"ENTRADA": "📥", "VENTA": "🛒", "AJUSTE": "⚙"}.get(row["tipo"], "")
+            color_tipo = {"ENTRADA": "#55c075", "VENTA": "#e05555", "AJUSTE": "#c8a96e"}.get(row["tipo"], "#666")
+            borde      = {"ENTRADA": "#55c075", "VENTA": "#e05555", "AJUSTE": "#c8a96e"}.get(row["tipo"], "#2a2a2a")
+            signo      = {"ENTRADA": "+", "VENTA": "−", "AJUSTE": "~"}.get(row["tipo"], "")
+
+            precio_str = f"$ COP {row['precio_venta_real']:,.0f}" if row["tipo"] == "VENTA" and row["precio_venta_real"] > 0 else ""
+            total_str  = f"Total: <b style='color:#55c075'>$ COP {row['total_venta']:,.0f}</b>" if row["tipo"] == "VENTA" and row["total_venta"] > 0 else ""
+
+            col_fila, col_btn = st.columns([6, 1])
+            with col_fila:
+                st.markdown(f"""
+                <div style='background:#1a1a1a;border:1px solid #2a2a2a;border-left:3px solid {borde};
+                            border-radius:8px;padding:12px 16px;margin:4px 0'>
+                    <div style='display:flex;justify-content:space-between;align-items:center'>
+                        <div>
+                            <span style='font-size:1rem;margin-right:8px'>{emoji}</span>
+                            <b style='color:#f0ece4'>{row['referencia']}</b>
+                            <span style='color:#555;margin:0 6px'>·</span>
+                            <span style='color:#888'>Talla {row['talla']:.0f}</span>
+                            <span style='color:#555;margin:0 6px'>·</span>
+                            <b style='color:{color_tipo}'>{signo}{int(row['cantidad'])} pares</b>
+                            {"&nbsp;·&nbsp;" + precio_str if precio_str else ""}
+                            {"&nbsp;·&nbsp;" + total_str if total_str else ""}
+                        </div>
+                        <div style='text-align:right;color:#555;font-size:0.75rem'>
+                            {row['fecha'][:16].replace('T',' ')}<br>
+                            <span style='color:#444'>{row['notas'] if row['notas'] else ''}</span>
+                        </div>
+                    </div>
+                </div>""", unsafe_allow_html=True)
+
+            with col_btn:
+                st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+                if st.button("🗑 Anular", key=f"anular_{row['id']}"):
+                    st.session_state.anular_confirm = None if st.session_state.anular_confirm == row["id"] else row["id"]
+                    st.rerun()
+
+            # Panel de confirmación
+            if st.session_state.anular_confirm == row["id"]:
+                st.warning(f"⚠ Esto anulará la **{row['tipo']}** de **{int(row['cantidad'])} par(es)** de **{row['referencia']}** talla **{row['talla']:.0f}** y restaurará el stock. ¿Confirmas?")
+                c1, c2 = st.columns([1, 4])
+                with c1:
+                    if st.button("✓ Sí, anular", key=f"confirm_anular_{row['id']}"):
+                        ok, msg = anular_movimiento(row["id"], row["producto_id"], row["talla"], row["tipo"], int(row["cantidad"]))
+                        if ok:
+                            st.session_state.anular_confirm = None
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                with c2:
+                    if st.button("✕ Cancelar", key=f"cancel_anular_{row['id']}"):
+                        st.session_state.anular_confirm = None
+                        st.rerun()
